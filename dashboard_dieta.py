@@ -1,84 +1,93 @@
 import streamlit as st
 import pandas as pd
-import os
-from datetime import datetime, timedelta
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
-# Configurações da Página
+# --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Dashboard Metabólico AI", layout="wide")
-st.title("📊 Seu Dashboard Metabólico Inteligente")
+st.title("📊 Seu Dashboard Metabólico (Nuvem)")
 
-# Arquivo para salvar os dados (banco de dados simples)
-DATA_FILE = "dados_dieta.csv"
+# --- CONEXÃO COM GOOGLE SHEETS ---
+def conectar_google_sheets():
+    # O Streamlit busca as credenciais que colocamos em "Secrets"
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    
+    # Converte o formato do secrets para o formato que o gspread entende
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    
+    client = gspread.authorize(creds)
+    # Abre a planilha pelo nome exato
+    sheet = client.open("DadosDieta").sheet1 
+    return sheet
 
-# Função para carregar dados
+# --- FUNÇÕES DE DADOS ---
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        return pd.DataFrame(columns=["Data", "Peso", "Calorias"])
     try:
-        df = pd.read_csv(DATA_FILE)
+        sheet = conectar_google_sheets()
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        
+        # Se a planilha estiver vazia ou com colunas erradas
+        if df.empty or 'Data' not in df.columns:
+            return pd.DataFrame(columns=["Data", "Peso", "Calorias"])
+            
         df['Data'] = pd.to_datetime(df['Data']).dt.date
         return df.sort_values(by="Data")
     except Exception as e:
+        # st.error(f"Erro ao carregar dados: {e}") # Debug silencioso para não assustar no começo
         return pd.DataFrame(columns=["Data", "Peso", "Calorias"])
 
-# Função para salvar dados
 def save_data(date, peso, calorias):
-    df = load_data()
-    new_data = pd.DataFrame({"Data": [date], "Peso": [peso], "Calorias": [calorias]})
+    sheet = conectar_google_sheets()
+    date_str = date.strftime("%Y-%m-%d")
     
-    # Se já existir registro no dia, atualiza
-    if date in df['Data'].values:
-        df.loc[df['Data'] == date, ['Peso', 'Calorias']] = [peso, calorias]
-    else:
-        df = pd.concat([df, new_data], ignore_index=True)
-    
-    df.to_csv(DATA_FILE, index=False)
-    return df
+    # Adiciona nova linha no Google Sheets
+    sheet.append_row([date_str, peso, calorias])
 
-# --- BARRA LATERAL: Entrada de Dados ---
+# --- BARRA LATERAL ---
 st.sidebar.header("📝 Registro Diário")
 data_input = st.sidebar.date_input("Data", datetime.now())
 peso_input = st.sidebar.number_input("Peso Hoje (kg)", format="%.2f", step=0.1)
 calorias_input = st.sidebar.number_input("Calorias Ingeridas", step=10)
 
-if st.sidebar.button("Salvar Registro"):
+if st.sidebar.button("Salvar no Google Sheets"):
     if peso_input > 0 and calorias_input > 0:
-        save_data(data_input, peso_input, calorias_input)
-        st.sidebar.success("Dados salvos com sucesso!")
+        with st.spinner("Conectando com o Google..."):
+            save_data(data_input, peso_input, calorias_input)
+        st.sidebar.success("✅ Salvo na Planilha!")
+        
+        # Espera 2 segundos e recarrega para mostrar o dado novo
+        import time
+        time.sleep(1)
+        st.rerun()
     else:
-        st.sidebar.error("Insira valores válidos.")
+        st.sidebar.error("Preencha valores válidos!")
 
-# --- LÓGICA DA INTELIGÊNCIA (CÁLCULO DE TDEE) ---
+# --- LÓGICA TDEE ---
 df = load_data()
 
-if len(df) > 7: # Precisa de pelo menos uma semana para começar a "inteligência"
-    # Cálculo de Médias Móveis (7 dias) para suavizar flutuações de água
+# Verifica se tem dados suficientes
+if not df.empty and len(df) > 7:
+    # Conversão numérica para evitar erros
+    df['Peso'] = pd.to_numeric(df['Peso'])
+    df['Calorias'] = pd.to_numeric(df['Calorias'])
+
     df['Media_Peso'] = df['Peso'].rolling(window=7).mean()
     df['Media_Calorias'] = df['Calorias'].rolling(window=7).mean()
     
-    # Pega os dados mais recentes (últimos 14 dias para análise de tendência)
     recent_df = df.tail(14)
     
     if len(recent_df) >= 7:
-        # Variação de peso na quinzena
         peso_inicial = recent_df.iloc[0]['Media_Peso']
         peso_final = recent_df.iloc[-1]['Media_Peso']
         delta_peso = peso_final - peso_inicial
-        
-        # Média de calorias ingeridas no período
         media_ingestao = recent_df['Media_Calorias'].mean()
         
-        # Fator de conversão: 7700kcal = 1kg
-        # Se delta_peso > 0, comeu acima da manutenção. Se < 0, comeu abaixo.
-        # Dias decorridos
         dias = len(recent_df)
-        
-        # Cálculo do Gasto Calórico Diário Real (TDEE)
-        # TDEE = Ingestão - (Mudança_Peso_kg * 7700 / dias)
-        superavit_total = delta_peso * 7700
-        superavit_diario = superavit_total / dias
+        superavit_diario = (delta_peso * 7700) / dias
         tdee_real = media_ingestao - superavit_diario
-        
         status_ia = True
     else:
         status_ia = False
@@ -87,33 +96,21 @@ else:
     status_ia = False
     tdee_real = 0
 
-# --- DASHBOARD PRINCIPAL ---
-
+# --- EXIBIÇÃO ---
 col1, col2, col3 = st.columns(3)
 
-# Exibição dos Cartões
 if status_ia:
-    col1.metric(label="🔥 TDEE (Manutenção Real)", value=f"{int(tdee_real)} kcal", delta="Calculado por IA")
-    col2.metric(label="📉 Para Secar (-0.5kg/sem)", value=f"{int(tdee_real - 500)} kcal")
-    col3.metric(label="📈 Para Ganhar (+0.25kg/sem)", value=f"{int(tdee_real + 250)} kcal")
-    
-    st.info(f"Baseado na análise dos seus últimos {len(recent_df)} dias, seu metabolismo está gastando aprox. **{int(tdee_real)}** calorias por dia.")
+    col1.metric("🔥 TDEE Real (Manutenção)", f"{int(tdee_real)} kcal")
+    col2.metric("📉 Para Secar (-0.5kg/sem)", f"{int(tdee_real - 500)} kcal")
+    col3.metric("📈 Para Ganhar (+0.25kg/sem)", f"{int(tdee_real + 250)} kcal")
+    st.info(f"Análise baseada nos últimos {len(recent_df)} dias de dados.")
 else:
-    col1.metric(label="Dados Insuficientes", value="--")
-    st.warning("⚠️ O sistema precisa de pelo menos 7 a 14 dias de dados contínuos para calcular seu metabolismo com precisão.")
+    col1.metric("Coletando Dados...", "--")
+    st.warning("⚠️ Continue registrando! O sistema precisa de 7 a 14 dias para calibrar.")
 
-# --- GRÁFICOS ---
 st.markdown("---")
-st.subheader("📈 Evolução Visual")
-
 if not df.empty:
-    chart_data = df.set_index("Data")[["Peso", "Calorias"]]
-    
-    # Gráfico de Peso
+    st.subheader("📈 Evolução")
     st.line_chart(df.set_index("Data")["Peso"])
-    
-    # Tabela de Histórico
-    with st.expander("Ver Histórico Completo"):
-        st.dataframe(df.sort_values(by="Data", ascending=False))
-else:
-    st.write("Comece a inserir dados na barra lateral.")
+    with st.expander("Ver Dados Brutos"):
+        st.dataframe(df)
