@@ -31,7 +31,7 @@ def load_data():
             csv_string = contents.decoded_content.decode("utf-8")
             df = pd.read_csv(StringIO(csv_string))
             
-            # Garante colunas novas (Altura)
+            # Garante colunas novas
             cols_obrigatorias = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura']
             for col in cols_obrigatorias:
                 if col not in df.columns:
@@ -61,7 +61,7 @@ def save_data(date, peso, calorias, passos, proteina, sono, cintura, altura):
         if "Altura" not in current_data.split('\n')[0]:
             df = pd.read_csv(StringIO(current_data))
             if 'Altura' not in df.columns: df['Altura'] = 0.0
-            # Adiciona a linha nova via pandas para garantir estrutura
+            # Adiciona a linha nova via pandas
             df_new = pd.DataFrame([[date_str, peso, calorias, passos, proteina, sono, cintura, altura]], 
                                   columns=df.columns)
             # Salva tudo
@@ -81,8 +81,8 @@ def save_data(date, peso, calorias, passos, proteina, sono, cintura, altura):
 # --- INICIALIZAÇÃO ---
 df = load_data()
 
-# Pega a última altura registrada para preencher o campo automaticamente
-last_height = 1.75 # Valor padrão
+# Pega a última altura registrada
+last_height = 1.75 
 if not df.empty and 'Altura' in df.columns:
     ultimo_val = df.iloc[-1]['Altura']
     if ultimo_val > 0:
@@ -92,13 +92,11 @@ if not df.empty and 'Altura' in df.columns:
 st.sidebar.header("📝 Diário Completo")
 data_inp = st.sidebar.date_input("Data", datetime.now())
 
-# Campos Biométricos
 st.sidebar.subheader("Biometria")
 peso_inp = st.sidebar.number_input("Peso (kg)", format="%.2f", step=0.1)
 altura_inp = st.sidebar.number_input("Altura (m)", format="%.2f", step=0.01, value=last_height)
 cintura_inp = st.sidebar.number_input("Cintura (cm)", format="%.1f", step=0.5)
 
-# Campos Diários
 st.sidebar.subheader("Rotina")
 calorias_inp = st.sidebar.number_input("Calorias", step=10)
 proteina_inp = st.sidebar.number_input("Proteína (g)", step=1)
@@ -114,8 +112,6 @@ if st.sidebar.button("💾 Salvar Tudo"):
     st.rerun()
 
 # --- ANÁLISE ---
-
-# Lógica IA
 tdee_real = 0
 status_ia = False
 ratio_proteina = 0
@@ -127,7 +123,6 @@ if not df.empty and len(df) > 7:
     for c in cols: 
         if c in df.columns: df[c] = pd.to_numeric(df[c])
 
-    # Médias Móveis
     df['M_Peso'] = df['Peso'].rolling(7).mean()
     df['M_Cals'] = df['Calorias'].rolling(7).mean()
     
@@ -143,7 +138,6 @@ if not df.empty and len(df) > 7:
         if pd.notna(media_prot) and peso_atual > 0:
             ratio_proteina = media_prot / peso_atual
             
-        # Cálculo IMC Atual
         altura_atual = recent.iloc[-1]['Altura']
         if altura_atual > 0:
             imc_atual = peso_atual / (altura_atual ** 2)
@@ -155,43 +149,40 @@ if not df.empty and len(df) > 7:
         status_ia = False
 
 # --- VISUALIZAÇÃO ---
-
-# Linha 1: IMC e Peso Ideal
 st.subheader("⚖️ Análise de Peso Ideal (IMC)")
 c1, c2, c3 = st.columns(3)
 
 if imc_atual > 0:
     c1.metric("Seu IMC Atual", f"{imc_atual:.1f}", classif_imc)
-    
-    # Cálculo das faixas de peso ideal (IMC 18.5 a 24.9)
     altura_user = df.iloc[-1]['Altura']
     peso_min_ideal = 18.5 * (altura_user ** 2)
     peso_max_ideal = 24.9 * (altura_user ** 2)
-    
     c2.metric("Seu Peso Ideal (Mín)", f"{peso_min_ideal:.1f} kg")
     c3.metric("Seu Peso Ideal (Max)", f"{peso_max_ideal:.1f} kg")
 else:
-    c1.info("Informe sua altura para calcular o IMC")
+    c1.info("Informe sua altura e salve para ver o cálculo.")
 
 st.markdown("---")
 
-# Linha 2: Metabolismo
 st.subheader("🔥 Metabolismo & Dieta")
 k1, k2, k3 = st.columns(3)
 if status_ia:
     k1.metric("Gasto Real (TDEE)", f"{int(tdee_real)} kcal")
     k2.metric("Meta Secar", f"{int(tdee_real - 500)} kcal")
-    
     msg_prot = "Baixa"
     if ratio_proteina > 1.6: msg_prot = "Ótima 💪"
     k3.metric("Proteína/kg", f"{ratio_proteina:.1f} g", msg_prot)
 else:
     k1.metric("Status", "Coletando dados...")
 
-# --- GRÁFICOS AVANÇADOS ---
+# --- GRÁFICOS AVANÇADOS (Correção do Erro Aqui) ---
 if not df.empty and 'Altura' in df.columns:
-    # Prepara dados para o gráfico de Peso Ideal
     altura_ref = df.iloc[-1]['Altura']
+    
+    # CORREÇÃO: Inicializa as colunas com 0 para não dar erro se altura for 0
+    df['Limite_Min'] = 0.0
+    df['Limite_Max'] = 0.0
+    
     if altura_ref > 0:
         df['Limite_Min'] = 18.5 * (altura_ref ** 2)
         df['Limite_Max'] = 24.9 * (altura_ref ** 2)
@@ -199,14 +190,12 @@ if not df.empty and 'Altura' in df.columns:
     tab1, tab2, tab3 = st.tabs(["🎯 Rumo ao Peso Ideal", "💪 Composição (Cintura)", "💤 Sono & Recuperação"])
     
     with tab1:
-        st.caption("Acompanhe se seu peso (Azul) está entrando na faixa de peso ideal (Verde/Vermelho)")
-        # Plota 3 linhas: Peso, Limite Minimo e Limite Maximo
+        st.caption("Acompanhe se seu peso (Azul) está entrando na faixa de peso ideal")
+        # Agora as colunas existem garantidamente
         st.line_chart(df.set_index("Data")[['Peso', 'Limite_Min', 'Limite_Max']], 
                       color=["#0000FF", "#00FF00", "#FF0000"]) 
-        # Azul = Peso, Verde = Minimo, Vermelho = Maximo
     
     with tab2:
-        st.caption("Peso e Cintura caindo juntos = Queima de gordura pura")
         st.line_chart(df.set_index("Data")[["Peso", "Cintura"]], color=["#0000FF", "#FFA500"])
         
     with tab3:
@@ -214,3 +203,4 @@ if not df.empty and 'Altura' in df.columns:
 
     with st.expander("Ver Tabela Completa"):
         st.dataframe(df.sort_values(by="Data", ascending=False))
+    
