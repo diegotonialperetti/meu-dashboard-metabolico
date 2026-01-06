@@ -31,7 +31,6 @@ def load_data():
             csv_string = contents.decoded_content.decode("utf-8")
             df = pd.read_csv(StringIO(csv_string))
             
-            # Tratamento para arquivos antigos (sem a coluna Passos)
             if 'Passos' not in df.columns:
                 df['Passos'] = 0
             
@@ -48,21 +47,17 @@ def save_data(date, peso, calorias, passos):
     if not repo: return
 
     date_str = date.strftime("%Y-%m-%d")
-    # Nova linha agora inclui passos
     new_line = f"{date_str},{peso},{calorias},{passos}\n"
 
     try:
         contents = repo.get_contents("dados_dieta.csv")
         current_data = contents.decoded_content.decode("utf-8")
         
-        # Se o arquivo antigo não tiver cabeçalho de Passos, a gente recria o cabeçalho
         if "Passos" not in current_data.split('\n')[0]:
             lines = current_data.split('\n')
-            # Adiciona ,Passos no cabeçalho
             lines[0] = lines[0].strip() + ",Passos"
-            # Adiciona ,0 nas linhas de dados antigas
             for i in range(1, len(lines)):
-                if lines[i].strip(): # Se a linha não for vazia
+                if lines[i].strip():
                     lines[i] = lines[i].strip() + ",0"
             current_data = '\n'.join(lines) + '\n'
 
@@ -78,7 +73,7 @@ st.sidebar.header("📝 Novo Registro")
 data_input = st.sidebar.date_input("Data", datetime.now())
 peso_input = st.sidebar.number_input("Peso (kg)", format="%.2f", step=0.1)
 calorias_input = st.sidebar.number_input("Calorias Ingeridas", step=10)
-passos_input = st.sidebar.number_input("Passos do Dia", step=100, value=0)
+passos_input = st.sidebar.number_input("Passos do Dia", step=100, value=0, help="Deixe 0 se não usou o relógio")
 
 if st.sidebar.button("💾 Salvar Dados"):
     with st.spinner("Salvando na nuvem..."):
@@ -91,12 +86,10 @@ if st.sidebar.button("💾 Salvar Dados"):
 # --- LÓGICA E VISUALIZAÇÃO ---
 df = load_data()
 
-# Lógica IA Adaptativa
 tdee_real = 0
 status_ia = False
 
 if not df.empty and len(df) > 7:
-    # Conversões para garantir números
     df['Peso'] = pd.to_numeric(df['Peso'])
     df['Calorias'] = pd.to_numeric(df['Calorias'])
     df['Passos'] = pd.to_numeric(df['Passos'])
@@ -109,7 +102,6 @@ if not df.empty and len(df) > 7:
         delta_peso = recent.iloc[-1]['Media_Peso'] - recent.iloc[0]['Media_Peso']
         media_kcal = recent['Media_Calorias'].mean()
         
-        # Cálculo Matemático
         superavit = (delta_peso * 7700) / len(recent)
         tdee_real = media_kcal - superavit
         status_ia = True
@@ -122,15 +114,30 @@ else:
 col1, col2, col3, col4 = st.columns(4)
 
 if status_ia:
-    col1.metric("🔥 Gasto Real (TDEE)", f"{int(tdee_real)} kcal", help="Quanto você gasta por dia somando tudo")
+    col1.metric("🔥 Gasto Real (TDEE)", f"{int(tdee_real)} kcal")
     col2.metric("🎯 Meta Secar", f"{int(tdee_real - 500)} kcal", "-0.5kg/sem")
     
-    # Estimativa de gasto só dos passos (Aprox 0.04 kcal por passo)
-    media_passos_sem = int(df.tail(7)['Passos'].mean())
-    kcal_passos = int(media_passos_sem * 0.04)
+    # --- NOVA LÓGICA DE PASSOS ---
+    # Pega os últimos 7 registros
+    semana_recente = df.tail(7)
     
-    col3.metric("👣 Média Passos (7d)", f"{media_passos_sem}", help="Média da última semana")
-    col4.metric("⚡ Gasto da Caminhada", f"~{kcal_passos} kcal", help="Estimativa do gasto só com os passos")
+    # Filtra: Só considera dias onde passos > 1
+    dias_com_passos = semana_recente[semana_recente['Passos'] > 1]
+    
+    if not dias_com_passos.empty:
+        # Calcula média só dos dias válidos
+        media_passos_validos = int(dias_com_passos['Passos'].mean())
+        kcal_passos = int(media_passos_validos * 0.04)
+        texto_passos = f"{media_passos_validos}"
+        texto_kcal = f"~{kcal_passos} kcal"
+        legenda_passos = "Média (Dias com relógio)"
+    else:
+        texto_passos = "--"
+        texto_kcal = "--"
+        legenda_passos = "Sem dados de passos"
+
+    col3.metric("👣 Média Passos", texto_passos, help=legenda_passos)
+    col4.metric("⚡ Gasto Caminhada", texto_kcal)
 else:
     col1.metric("Status", "Coletando dados...")
     st.info("Continue registrando! O sistema precisa de 7 dias para começar a calcular.")
@@ -143,13 +150,16 @@ if not df.empty:
     
     with tab1:
         st.subheader("Evolução do Peso")
-        # Gráfico simples de linha
         st.line_chart(df.set_index("Data")["Peso"])
     
     with tab2:
-        st.subheader("Você anda mais, o peso cai?")
-        # Gráfico de barras para passos
-        st.bar_chart(df.set_index("Data")["Passos"])
+        st.subheader("Dias que você caminhou")
+        # Filtra o gráfico para não mostrar barras vazias feias
+        df_grafico_passos = df[df['Passos'] > 1]
+        if not df_grafico_passos.empty:
+            st.bar_chart(df_grafico_passos.set_index("Data")["Passos"])
+        else:
+            st.write("Nenhum dado de passos registrado ainda.")
         
     with st.expander("Ver Tabela de Dados"):
         st.dataframe(df.sort_values(by="Data", ascending=False))
