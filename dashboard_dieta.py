@@ -137,31 +137,41 @@ if st.sidebar.button("💾 Salvar Dados"):
     time.sleep(1)
     st.rerun()
 
-# --- CÁLCULOS GLOBAIS ---
+# --- CÁLCULOS GLOBAIS DESTRAVADOS ---
 tdee_real = 0
 status_ia = False
 ratio_proteina = 0
 imc_atual = 0
 classif_imc = ""
 
-if not df.empty and len(df) > 7:
+if not df.empty:
     cols = ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia']
     for c in cols: df[c] = pd.to_numeric(df[c])
 
-    # Médias Móveis para TDEE (Aqui não filtramos zero pois TDEE precisa da continuidade dos dias)
-    df['M_Peso'] = df['Peso'].rolling(7).mean()
-    df['M_Cals'] = df['Calorias'].rolling(7).mean()
+    # AQUI ESTAVA A TRAVA: Mudamos de 7 para 2 dias
+    dias_registrados = len(df)
     
-    recent = df.tail(14)
-    if len(recent) >= 7:
-        delta_p = recent.iloc[-1]['M_Peso'] - recent.iloc[0]['M_Peso']
-        media_kcal = recent['M_Cals'].mean()
-        tdee_real = media_kcal - ((delta_p * 7700) / len(recent))
+    if dias_registrados >= 2:
+        # Se tiver menos de 7 dias, usa todos os dias disponíveis para a média
+        window_size = min(7, dias_registrados)
+        
+        # Cria médias móveis
+        recent = df.tail(window_size)
+        
+        delta_peso = recent.iloc[-1]['Peso'] - recent.iloc[0]['Peso']
+        media_kcal = recent['Calorias'].mean()
+        
+        # Fórmula do TDEE Adaptativo
+        # Fator 7700 = calorias por kg de gordura
+        # Se você perdeu peso, seu gasto é (Ingestão + Deficit)
+        # Se você ganhou peso, seu gasto é (Ingestão - Superavit)
+        superavit_diario = (delta_peso * 7700) / window_size
+        tdee_real = media_kcal - superavit_diario
         status_ia = True
         
         peso_atual = recent.iloc[-1]['Peso']
         
-        # Proteína (Filtra Zeros)
+        # Proteína
         dias_com_prot = recent[recent['Proteina'] > 0]
         media_prot = dias_com_prot['Proteina'].mean() if not dias_com_prot.empty else 0
         if peso_atual > 0: ratio_proteina = media_prot / peso_atual
@@ -170,8 +180,8 @@ if not df.empty and len(df) > 7:
         altura_atual = recent.iloc[-1]['Altura']
         if altura_atual > 0:
             imc_atual = peso_atual / (altura_atual ** 2)
-            if imc_atual < 18.5: classif_imc = "Abaixo do Peso"
-            elif imc_atual < 24.9: classif_imc = "Peso Ideal ✅"
+            if imc_atual < 18.5: classif_imc = "Abaixo"
+            elif imc_atual < 24.9: classif_imc = "Ideal ✅"
             elif imc_atual < 29.9: classif_imc = "Sobrepeso"
             else: classif_imc = "Obesidade"
     else:
@@ -182,19 +192,18 @@ st.subheader("📊 Painel de Controle Metabólico")
 col1, col2, col3, col4 = st.columns(4)
 
 if status_ia:
-    col1.metric("🔥 TDEE (Gasto)", f"{int(tdee_real)} kcal", f"Meta: {int(tdee_real - 500)}")
-    col2.metric("🍖 Proteína Média", f"{ratio_proteina:.1f} g/kg", "Considerando dias registrados")
+    col1.metric("🔥 TDEE (Gasto)", f"{int(tdee_real)} kcal", f"Base: {dias_registrados} dias")
+    col2.metric("🍖 Proteína Média", f"{ratio_proteina:.1f} g/kg", "Média recente")
 else:
-    col1.metric("Status", "Coletando...")
+    col1.metric("Status", f"Tenho {len(df)} registro(s)")
+    st.warning("Preciso de pelo menos 2 registros em dias diferentes para calcular.")
 
-# --- MÉTRICAS INTELIGENTES (FILTRO DE ZEROS) ---
+# --- MÉTRICAS INTELIGENTES ---
 if not df.empty:
-    # SONO
     dias_sono = df[df['Sono'] > 0].tail(7)
     val_sono = f"{dias_sono['Sono'].mean():.1f} h" if not dias_sono.empty else "--"
     col3.metric("💤 Sono Médio", val_sono)
     
-    # PASSOS
     dias_passos = df[df['Passos'] > 0].tail(7)
     val_passos = f"{int(dias_passos['Passos'].mean())}" if not dias_passos.empty else "--"
     col4.metric("👣 Passos Médios", val_passos)
@@ -202,26 +211,23 @@ if not df.empty:
 # Linha 2 de Métricas
 c1, c2, c3, c4 = st.columns(4)
 if not df.empty:
-    # BPM
     dias_bpm = df[df['BPM'] > 0].tail(7)
     val_bpm = f"{int(dias_bpm['BPM'].mean())} bpm" if not dias_bpm.empty else "--"
     c1.metric("❤️ BPM Repouso", val_bpm)
     
-    # ENERGIA
     dias_energia = df[df['Energia'] > 0].tail(7)
     val_energia = f"{dias_energia['Energia'].mean():.1f}/10" if not dias_energia.empty else "--"
     c2.metric("⚡ Energia Média", val_energia)
     
-    # IMC
     if imc_atual > 0:
         c3.metric("⚖️ IMC Atual", f"{imc_atual:.1f}", classif_imc)
         altura_ref = df.iloc[-1]['Altura']
-        peso_ideal = 21.7 * (altura_ref ** 2) # Media do IMC ideal
-        c4.metric("🎯 Alvo (IMC 21.7)", f"{peso_ideal:.1f} kg", f"Faltam {peso_atual - peso_ideal:.1f} kg")
+        peso_ideal = 21.7 * (altura_ref ** 2)
+        c4.metric("🎯 Alvo (IMC 21.7)", f"{peso_ideal:.1f} kg", f"Falta {peso_atual - peso_ideal:.1f} kg")
 
 st.markdown("---")
 
-# --- GRÁFICOS (COM FILTRO VISUAL) ---
+# --- GRÁFICOS ---
 if not df.empty and 'Altura' in df.columns:
     altura_ref = df.iloc[-1]['Altura']
     df['Limite_Min'] = 18.5 * (altura_ref ** 2) if altura_ref > 0 else 0
@@ -236,8 +242,7 @@ if not df.empty and 'Altura' in df.columns:
     with tab2:
         col_g1, col_g2 = st.columns(2)
         with col_g1:
-            st.caption("Evolução da Cintura (Ignorando dias não medidos)")
-            # Filtra Zeros para o gráfico não cair
+            st.caption("Evolução da Cintura")
             df_cintura = df[df['Cintura'] > 0]
             if not df_cintura.empty:
                 st.line_chart(df_cintura.set_index("Data")["Cintura"], color="#FFA500")
@@ -248,8 +253,7 @@ if not df.empty and 'Altura' in df.columns:
             st.bar_chart(df.set_index("Data")["Proteina"], color="#00FF00")
         
     with tab3:
-        st.caption("BPM (Vermelho) vs Sono (Azul) - Dias sem registro são ignorados")
-        # Cria um dataframe apenas com dados válidos para o gráfico ficar bonito
+        st.caption("BPM (Vermelho) vs Sono (Azul)")
         df_saude = df[(df['BPM'] > 0) & (df['Sono'] > 0)]
         if not df_saude.empty:
             st.line_chart(df_saude.set_index("Data")[["BPM", "Sono"]], color=["#FF0000", "#0000FF"])
