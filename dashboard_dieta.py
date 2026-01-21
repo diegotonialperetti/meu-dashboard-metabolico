@@ -36,11 +36,10 @@ def load_data():
             for col in cols:
                 if col not in df.columns: df[col] = 0.0
             
-            # LIMPEZA PESADA: Converte erros em NaT e força apenas DATA
+            # LIMPEZA PESADA (Mantida da versão anterior)
             df['Data'] = pd.to_datetime(df['Data'], errors='coerce').dt.date
-            df = df.dropna(subset=['Data']) # Remove linhas corrompidas
+            df = df.dropna(subset=['Data']) 
             
-            # Remove duplicatas mantendo a última
             df = df.sort_values(by="Data")
             df = df.drop_duplicates(subset=['Data'], keep='last')
             
@@ -51,7 +50,7 @@ def load_data():
     except Exception as e:
         return pd.DataFrame()
 
-# --- SALVAR DADOS (AGORA COM FAXINA AUTOMÁTICA) ---
+# --- SALVAR DADOS ---
 def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia, p_high, p_low, spo2):
     repo = get_github_connection()
     if not repo: return
@@ -61,33 +60,27 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
         csv_string = contents.decoded_content.decode("utf-8")
         df = pd.read_csv(StringIO(csv_string))
         
-        # 1. Garante todas as colunas
         cols = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
         for col in cols:
             if col not in df.columns: df[col] = 0.0
         
-        # 2. O PULO DO GATO: Limpa as datas ANTIGAS antes de verificar
-        # 'errors=coerce' ignora o lixo, '.dt.date' remove a hora problemática
+        # Limpeza antes de salvar
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce').dt.date
-        df = df.dropna(subset=['Data']) # Se alguma linha estiver impossível de ler, ela sai
+        df = df.dropna(subset=['Data'])
 
-        # Prepara a nova linha
         vals = [peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia, p_high, p_low, spo2]
         cols_save = ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
         
         if data_ref in df['Data'].values:
-            # Atualiza
             df.loc[df['Data'] == data_ref, cols_save] = vals
             msg_commit = f"Update: {data_ref}"
         else:
-            # Cria novo
             new_row_dict = {'Data': data_ref}
             for c, v in zip(cols_save, vals): new_row_dict[c] = v
             new_row = pd.DataFrame([new_row_dict])
             df = pd.concat([df, new_row], ignore_index=True)
             msg_commit = f"Novo: {data_ref}"
 
-        # Salva o arquivo limpo de volta
         output = StringIO()
         df.to_csv(output, index=False)
         repo.update_file("dados_dieta.csv", msg_commit, output.getvalue(), contents.sha)
@@ -98,7 +91,7 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
 # --- INICIALIZAÇÃO ---
 df = load_data()
 
-st.sidebar.header("📝 Diário & Anel")
+st.sidebar.header("📝 Diário & Smart Ring") # MUDADO AQUI
 data_selecionada = st.sidebar.date_input("Data", datetime.now())
 
 # Defaults
@@ -118,7 +111,8 @@ else:
         if df.iloc[-1]['Altura'] > 0: defaults['Altura'] = float(df.iloc[-1]['Altura'])
 
 # --- FORMULÁRIO ---
-with st.sidebar.expander("❤️ Cardíaco & Anel", expanded=True):
+# MUDADO AQUI O NOME DO EXPANDER
+with st.sidebar.expander("💍 Smart Ring / Cardio", expanded=True):
     bpm_inp = st.number_input("BPM Médio", value=int(defaults['BPM']), step=1)
     spo2_inp = st.number_input("Oxigênio (SpO2 %)", value=int(defaults['SpO2']), step=1, max_value=100)
     st.caption("Pressão Arterial")
@@ -207,7 +201,8 @@ if not df.empty and 'Altura' in df.columns:
     df['Limite_Min'] = 18.5 * (altura_ref ** 2) if altura_ref > 0 else 0
     df['Limite_Max'] = 24.9 * (altura_ref ** 2) if altura_ref > 0 else 0
     
-    tab1, tab2, tab3 = st.tabs(["🎯 Peso & IMC", "❤️ Saúde do Anel", "⚡ Energia & Sono"])
+    # MUDADO AQUI O NOME DA ABA
+    tab1, tab2, tab3 = st.tabs(["🎯 Peso & IMC", "💍 Smart Ring & Cardio", "⚡ Energia & Sono"])
     
     with tab1:
         st.line_chart(df.set_index("Data")[['Peso', 'Limite_Min', 'Limite_Max']], 
