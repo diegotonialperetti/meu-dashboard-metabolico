@@ -1,12 +1,14 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import altair as alt
 from github import Github
 from io import StringIO
-from datetime import datetime, date
+from datetime import datetime, date, time
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Dashboard Biohacker Pro", layout="wide")
-st.title("🧬 Dashboard Biohacker: Performance & Recuperação")
+st.set_page_config(page_title="Biohacker Circadiano", layout="wide")
+st.title("🧬 Biohacker: Análise de Ritmo Circadiano (24h)")
 
 # --- CONEXÃO GITHUB ---
 def get_github_connection():
@@ -31,21 +33,27 @@ def load_data():
             csv_string = contents.decoded_content.decode("utf-8")
             df = pd.read_csv(StringIO(csv_string))
             
-            # Garante colunas
-            cols = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia']
+            # Colunas necessárias
+            cols = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
             for col in cols:
                 if col not in df.columns: df[col] = 0.0
             
-            df['Data'] = pd.to_datetime(df['Data']).dt.date
-            return df.sort_values(by="Data")
+            # Tenta converter Data para datetime completo (Data + Hora)
+            # Se for formato antigo (só data), ele põe hora 00:00
+            df['Timestamp'] = pd.to_datetime(df['Data'])
+            df['Data_So'] = df['Timestamp'].dt.date
+            df['Hora'] = df['Timestamp'].dt.hour
+            df['Minuto'] = df['Timestamp'].dt.minute
+            
+            return df.sort_values(by="Timestamp")
         except:
-            return pd.DataFrame(columns=["Data", "Peso", "Calorias", "Passos", "Proteina", "Sono", "Cintura", "Altura", "BPM", "Energia"])
+            return pd.DataFrame(columns=["Data", "Peso", "Calorias", "BPM", "SpO2", "Pressao_High", "Pressao_Low"])
             
     except Exception as e:
         return pd.DataFrame()
 
-# --- SALVAR DADOS ---
-def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia):
+# --- SALVAR DADOS (COM HORA) ---
+def save_data(data_ref, hora_ref, peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia, p_high, p_low, spo2):
     repo = get_github_connection()
     if not repo: return
 
@@ -54,24 +62,25 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
         csv_string = contents.decoded_content.decode("utf-8")
         df = pd.read_csv(StringIO(csv_string))
         
-        cols = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia']
-        for col in cols:
+        # Garante colunas
+        cols_check = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
+        for col in cols_check:
             if col not in df.columns: df[col] = 0.0
+            
+        # Cria String de Data+Hora
+        str_datetime = f"{data_ref} {hora_ref.strftime('%H:%M:%S')}"
         
-        df['Data'] = pd.to_datetime(df['Data']).dt.date
-
-        if data_ref in df['Data'].values:
-            df.loc[df['Data'] == data_ref, ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia']] = \
-                [peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia]
-            msg_commit = f"Update registro: {data_ref}"
-        else:
-            new_row = pd.DataFrame([{
-                'Data': data_ref, 'Peso': peso, 'Calorias': calorias, 'Passos': passos,
-                'Proteina': proteina, 'Sono': sono, 'Cintura': cintura, 'Altura': altura,
-                'BPM': bpm, 'Energia': energia
-            }])
-            df = pd.concat([df, new_row], ignore_index=True)
-            msg_commit = f"Novo registro: {data_ref}"
+        # Cria nova linha
+        new_row = pd.DataFrame([{
+            'Data': str_datetime, 
+            'Peso': peso, 'Calorias': calorias, 'Passos': passos,
+            'Proteina': proteina, 'Sono': sono, 'Cintura': cintura, 'Altura': altura,
+            'BPM': bpm, 'Energia': energia, 
+            'Pressao_High': p_high, 'Pressao_Low': p_low, 'SpO2': spo2
+        }])
+        
+        df = pd.concat([df, new_row], ignore_index=True)
+        msg_commit = f"Registro: {str_datetime}"
 
         output = StringIO()
         df.to_csv(output, index=False)
@@ -83,185 +92,111 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
 # --- INICIALIZAÇÃO ---
 df = load_data()
 
-st.sidebar.header("📝 Diário Inteligente")
+st.sidebar.header("⏱️ Registro Pontual")
 data_selecionada = st.sidebar.date_input("Data", datetime.now())
+hora_selecionada = st.sidebar.time_input("Hora da Leitura", datetime.now().time())
 
-# Valores padrão
-defaults = {
-    'Peso': 0.0, 'Altura': 1.75, 'Cintura': 0.0,
-    'Calorias': 0, 'Proteina': 0, 'Passos': 0, 'Sono': 0.0,
-    'BPM': 0, 'Energia': 5
-}
+# Tenta pegar defaults do último registro geral (para facilitar)
+defaults = {k: 0.0 for k in ['Peso', 'Altura', 'Cintura', 'Calorias', 'Proteina', 'Passos', 'Sono', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']}
+defaults['Altura'] = 1.75
+defaults['Energia'] = 5
 
-# Auto-preenchimento
-dados_do_dia = df[df['Data'] == data_selecionada]
-if not dados_do_dia.empty:
-    row = dados_do_dia.iloc[0]
-    st.sidebar.info("✏️ Editando dia existente.")
-    defaults['Peso'] = float(row['Peso'])
-    defaults['Altura'] = float(row['Altura']) if row['Altura'] > 0 else 1.75
-    defaults['Cintura'] = float(row['Cintura'])
-    defaults['Calorias'] = int(row['Calorias'])
-    defaults['Proteina'] = int(row['Proteina'])
-    defaults['Passos'] = int(row['Passos'])
-    defaults['Sono'] = float(row['Sono'])
-    defaults['BPM'] = int(row['BPM'])
-    defaults['Energia'] = int(row['Energia'])
-else:
-    if not df.empty and 'Altura' in df.columns:
-        ult_altura = df.iloc[-1]['Altura']
-        if ult_altura > 0: defaults['Altura'] = float(ult_altura)
+if not df.empty:
+    ult = df.iloc[-1]
+    # Puxa dados que geralmente não mudam no dia (Peso, Altura)
+    defaults['Peso'] = float(ult['Peso'])
+    defaults['Altura'] = float(ult['Altura']) if ult['Altura'] > 0 else 1.75
+    defaults['Cintura'] = float(ult['Cintura'])
 
-# --- INPUTS ---
-st.sidebar.subheader("Biometria")
-peso_inp = st.sidebar.number_input("Peso (kg)", value=defaults['Peso'], format="%.2f", step=0.1)
-altura_inp = st.sidebar.number_input("Altura (m)", value=defaults['Altura'], format="%.2f", step=0.01)
-cintura_inp = st.sidebar.number_input("Cintura (cm)", value=defaults['Cintura'], format="%.1f", step=0.5)
+# --- FORMULÁRIO ---
+st.sidebar.markdown("### 🫀 Leitura do Anel")
+bpm_inp = st.sidebar.number_input("BPM (Neste horário)", value=0, step=1, help="Ex: 49 as 03:30")
+spo2_inp = st.sidebar.number_input("SpO2 %", value=0, step=1)
+p_high_inp = st.sidebar.number_input("Pressão Alta", value=0)
+p_low_inp = st.sidebar.number_input("Pressão Baixa", value=0)
 
-st.sidebar.subheader("Rotina Diária")
-col_s1, col_s2 = st.sidebar.columns(2)
-with col_s1:
-    calorias_inp = st.number_input("Calorias", value=defaults['Calorias'], step=10)
-    passos_inp = st.number_input("Passos", value=defaults['Passos'], step=100)
-    bpm_inp = st.number_input("BPM ❤️", value=defaults['BPM'], step=1)
-with col_s2:
-    proteina_inp = st.number_input("Proteína (g)", value=defaults['Proteina'], step=1)
-    sono_inp = st.number_input("Sono (h)", value=defaults['Sono'], format="%.1f", step=0.5)
-    energia_inp = st.slider("Energia ⚡", 1, 10, value=defaults['Energia'])
+st.sidebar.markdown("### 📝 Dados do Dia (Opcional)")
+st.sidebar.caption("Preencha só se quiser atualizar o dia")
+peso_inp = st.sidebar.number_input("Peso (kg)", value=defaults['Peso'], format="%.2f")
+calorias_inp = st.sidebar.number_input("Calorias", value=0, step=10)
+proteina_inp = st.sidebar.number_input("Proteína (g)", value=0, step=1)
+passos_inp = st.sidebar.number_input("Passos", value=0, step=100)
+sono_inp = st.sidebar.number_input("Sono (h)", value=0.0, format="%.1f")
+energia_inp = st.sidebar.slider("Energia", 1, 10, value=5)
+cintura_inp = st.sidebar.hidden_input = defaults['Cintura']
+altura_inp = st.sidebar.hidden_input = defaults['Altura']
 
-if st.sidebar.button("💾 Salvar Dados"):
-    with st.spinner("Processando..."):
-        save_data(data_selecionada, peso_inp, calorias_inp, passos_inp, proteina_inp, sono_inp, cintura_inp, altura_inp, bpm_inp, energia_inp)
-    st.success("Salvo com sucesso!")
+if st.sidebar.button("💾 Salvar Leitura"):
+    with st.spinner("Salvando Ponto..."):
+        save_data(data_selecionada, hora_selecionada, peso_inp, calorias_inp, passos_inp, proteina_inp, sono_inp, cintura_inp, altura_inp, bpm_inp, energia_inp, p_high_inp, p_low_inp, spo2_inp)
+    st.success("Ponto Registrado!")
     import time
     time.sleep(1)
     st.rerun()
 
-# --- CÁLCULOS GLOBAIS ---
-tdee_real = 0
-status_ia = False
-ratio_proteina = 0
-imc_atual = 0
-classif_imc = ""
+# --- ANÁLISE ---
+st.subheader("🕑 Seu Coração nas 24 Horas")
 
-if not df.empty and len(df) > 7:
-    cols = ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia']
-    for c in cols: df[c] = pd.to_numeric(df[c])
-
-    # Médias Móveis para TDEE (Aqui não filtramos zero pois TDEE precisa da continuidade dos dias)
-    df['M_Peso'] = df['Peso'].rolling(7).mean()
-    df['M_Cals'] = df['Calorias'].rolling(7).mean()
+if not df.empty:
+    # Filtra apenas dados com BPM > 0
+    df_bpm = df[df['BPM'] > 0].copy()
     
-    recent = df.tail(14)
-    if len(recent) >= 7:
-        delta_p = recent.iloc[-1]['M_Peso'] - recent.iloc[0]['M_Peso']
-        media_kcal = recent['M_Cals'].mean()
-        tdee_real = media_kcal - ((delta_p * 7700) / len(recent))
-        status_ia = True
+    if not df_bpm.empty:
+        # Criação do Gráfico Circadiano
+        # Eixo X = Hora do dia (decimal para ficar contínuo, ex: 3h30 = 3.5)
+        df_bpm['Hora_Decimal'] = df_bpm['Hora'] + (df_bpm['Minuto'] / 60)
         
-        peso_atual = recent.iloc[-1]['Peso']
+        # Gráfico de Dispersão (Pontos)
+        scatter = alt.Chart(df_bpm).mark_circle(size=60).encode(
+            x=alt.X('Hora_Decimal', title='Hora do Dia (0h - 24h)', scale=alt.Scale(domain=[0, 24])),
+            y=alt.Y('BPM', title='Batimentos', scale=alt.Scale(domain=[30, 180])),
+            color=alt.Color('Data_So', legend=None), # Cores diferentes por dia
+            tooltip=['Data_So', 'Hora', 'Minuto', 'BPM']
+        ).interactive()
+
+        # Linha de Tendência (Média Geral por Horário)
+        line = scatter.transform_loess(
+            'Hora_Decimal', 'BPM', bandwidth=0.2
+        ).mark_line(color='red', size=4).encode(
+            opacity=alt.value(1)
+        )
+
+        st.altair_chart(scatter + line, use_container_width=True)
+        st.info("🔴 A linha VERMELHA mostra o seu padrão normal. As bolinhas são suas leituras.")
         
-        # Proteína (Filtra Zeros)
-        dias_com_prot = recent[recent['Proteina'] > 0]
-        media_prot = dias_com_prot['Proteina'].mean() if not dias_com_prot.empty else 0
-        if peso_atual > 0: ratio_proteina = media_prot / peso_atual
+        # Estatísticas por Turno
+        st.write("#### 📊 Média por Turno")
+        col1, col2, col3 = st.columns(3)
         
-        # IMC
-        altura_atual = recent.iloc[-1]['Altura']
-        if altura_atual > 0:
-            imc_atual = peso_atual / (altura_atual ** 2)
-            if imc_atual < 18.5: classif_imc = "Abaixo do Peso"
-            elif imc_atual < 24.9: classif_imc = "Peso Ideal ✅"
-            elif imc_atual < 29.9: classif_imc = "Sobrepeso"
-            else: classif_imc = "Obesidade"
+        madrugada = df_bpm[(df_bpm['Hora'] >= 0) & (df_bpm['Hora'] < 6)]
+        dia = df_bpm[(df_bpm['Hora'] >= 6) & (df_bpm['Hora'] < 18)]
+        noite = df_bpm[(df_bpm['Hora'] >= 18)]
+        
+        if not madrugada.empty: col1.metric("Madrugada (Sono)", f"{int(madrugada['BPM'].mean())} bpm", f"Mínimo: {int(madrugada['BPM'].min())}")
+        if not dia.empty: col2.metric("Dia (Ativo)", f"{int(dia['BPM'].mean())} bpm")
+        if not noite.empty: col3.metric("Noite (Repouso)", f"{int(noite['BPM'].mean())} bpm")
+
     else:
-        status_ia = False
-
-# --- LAYOUT VISUAL ---
-st.subheader("📊 Painel de Controle Metabólico")
-col1, col2, col3, col4 = st.columns(4)
-
-if status_ia:
-    col1.metric("🔥 TDEE (Gasto)", f"{int(tdee_real)} kcal", f"Meta: {int(tdee_real - 500)}")
-    col2.metric("🍖 Proteína Média", f"{ratio_proteina:.1f} g/kg", "Considerando dias registrados")
-else:
-    col1.metric("Status", "Coletando...")
-
-# --- MÉTRICAS INTELIGENTES (FILTRO DE ZEROS) ---
-if not df.empty:
-    # SONO
-    dias_sono = df[df['Sono'] > 0].tail(7)
-    val_sono = f"{dias_sono['Sono'].mean():.1f} h" if not dias_sono.empty else "--"
-    col3.metric("💤 Sono Médio", val_sono)
-    
-    # PASSOS
-    dias_passos = df[df['Passos'] > 0].tail(7)
-    val_passos = f"{int(dias_passos['Passos'].mean())}" if not dias_passos.empty else "--"
-    col4.metric("👣 Passos Médios", val_passos)
-
-# Linha 2 de Métricas
-c1, c2, c3, c4 = st.columns(4)
-if not df.empty:
-    # BPM
-    dias_bpm = df[df['BPM'] > 0].tail(7)
-    val_bpm = f"{int(dias_bpm['BPM'].mean())} bpm" if not dias_bpm.empty else "--"
-    c1.metric("❤️ BPM Repouso", val_bpm)
-    
-    # ENERGIA
-    dias_energia = df[df['Energia'] > 0].tail(7)
-    val_energia = f"{dias_energia['Energia'].mean():.1f}/10" if not dias_energia.empty else "--"
-    c2.metric("⚡ Energia Média", val_energia)
-    
-    # IMC
-    if imc_atual > 0:
-        c3.metric("⚖️ IMC Atual", f"{imc_atual:.1f}", classif_imc)
-        altura_ref = df.iloc[-1]['Altura']
-        peso_ideal = 21.7 * (altura_ref ** 2) # Media do IMC ideal
-        c4.metric("🎯 Alvo (IMC 21.7)", f"{peso_ideal:.1f} kg", f"Faltam {peso_atual - peso_ideal:.1f} kg")
+        st.warning("Adicione leituras de BPM com horários diferentes para gerar o gráfico.")
 
 st.markdown("---")
 
-# --- GRÁFICOS (COM FILTRO VISUAL) ---
-if not df.empty and 'Altura' in df.columns:
-    altura_ref = df.iloc[-1]['Altura']
-    df['Limite_Min'] = 18.5 * (altura_ref ** 2) if altura_ref > 0 else 0
-    df['Limite_Max'] = 24.9 * (altura_ref ** 2) if altura_ref > 0 else 0
-    
-    tab1, tab2, tab3, tab4 = st.tabs(["🎯 Peso & IMC", "💪 Cintura & Proteína", "❤️ Coração & Sono", "⚡ Energia & Passos"])
-    
-    with tab1:
-        st.line_chart(df.set_index("Data")[['Peso', 'Limite_Min', 'Limite_Max']], 
-                      color=["#0000FF", "#00FF00", "#FF0000"]) 
-    
-    with tab2:
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            st.caption("Evolução da Cintura (Ignorando dias não medidos)")
-            # Filtra Zeros para o gráfico não cair
-            df_cintura = df[df['Cintura'] > 0]
-            if not df_cintura.empty:
-                st.line_chart(df_cintura.set_index("Data")["Cintura"], color="#FFA500")
-            else:
-                st.info("Sem dados de cintura.")
-        with col_g2:
-            st.caption("Ingestão de Proteína")
-            st.bar_chart(df.set_index("Data")["Proteina"], color="#00FF00")
-        
-    with tab3:
-        st.caption("BPM (Vermelho) vs Sono (Azul) - Dias sem registro são ignorados")
-        # Cria um dataframe apenas com dados válidos para o gráfico ficar bonito
-        df_saude = df[(df['BPM'] > 0) & (df['Sono'] > 0)]
-        if not df_saude.empty:
-            st.line_chart(df_saude.set_index("Data")[["BPM", "Sono"]], color=["#FF0000", "#0000FF"])
-        else:
-            st.info("Preencha BPM e Sono no mesmo dia para ver a correlação.")
+# --- DASHBOARD DIÁRIO (AGREGADO) ---
+st.subheader("📆 Resumo Diário")
 
-    with tab4:
-        df_energia = df[df['Energia'] > 0]
-        if not df_energia.empty:
-            st.line_chart(df_energia.set_index("Data")[["Energia", "Passos"]], color=["#FFA500", "#808080"])
-        else:
-            st.info("Sem dados de energia.")
-
-    with st.expander("Ver Banco de Dados Completo"):
-        st.dataframe(df.sort_values(by="Data", ascending=False))
+# Agrupa dados por dia (Média do dia)
+if not df.empty:
+    df_daily = df.groupby('Data_So').agg({
+        'Peso': lambda x: x[x > 0].mean() if not x[x > 0].empty else 0,
+        'Calorias': 'sum', # Calorias soma
+        'Proteina': 'sum', # Proteina soma
+        'Passos': 'max',   # Passos pega o máximo do dia
+        'Sono': 'max',     # Sono pega o máximo do dia
+        'Pressao_High': 'max',
+        'SpO2': 'mean'
+    }).reset_index()
+    
+    df_daily.rename(columns={'Data_So': 'Data'}, inplace=True)
+    df_daily = df_daily.sort_values(by="Data", ascending=False)
+    
+    st.dataframe(df_daily.head(7))
