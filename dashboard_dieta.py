@@ -20,7 +20,7 @@ def get_github_connection():
         st.error(f"Erro Github: {e}")
         return None
 
-# --- CARREGAR DADOS (COM LIMPEZA AUTOMÁTICA) ---
+# --- CARREGAR DADOS (COM FAXINA DE DATA) ---
 def load_data():
     try:
         repo = get_github_connection()
@@ -31,22 +31,29 @@ def load_data():
             csv_string = contents.decoded_content.decode("utf-8")
             df = pd.read_csv(StringIO(csv_string))
             
-            # 1. Garante que todas as colunas existem (Evita KeyError)
+            # 1. Garante colunas
             cols = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
             for col in cols:
                 if col not in df.columns: df[col] = 0.0
             
-            # 2. LIMPEZA DE DATA (O Segredo para corrigir o erro)
-            # Converte tudo para data, ignorando horas, minutos e segundos
-            df['Data'] = pd.to_datetime(df['Data']).dt.date
+            # 2. FAXINA DE DATA (CORREÇÃO DO ERRO)
+            # Converte tudo para datetime primeiro (lidando com erros)
+            df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
             
-            # 3. Remove duplicatas do mesmo dia (Mantém o último registro salvo)
+            # Remove linhas onde a data não pôde ser lida (NaT)
+            df = df.dropna(subset=['Data'])
+            
+            # Remove a parte da hora, deixando só a data (YYYY-MM-DD)
+            df['Data'] = df['Data'].dt.date
+            
+            # 3. Remove duplicatas do mesmo dia (mantém o último salvo)
             df = df.sort_values(by="Data")
             df = df.drop_duplicates(subset=['Data'], keep='last')
             
             return df
-        except:
-            return pd.DataFrame(columns=["Data", "Peso", "Calorias", "Passos", "Proteina", "Sono", "Cintura", "Altura", "BPM", "Energia"])
+        except Exception as e:
+            # Em caso de erro grave, retorna vazio mas printa no log se precisar
+            return pd.DataFrame(columns=["Data", "Peso", "Calorias", "Passos", "Proteina", "Sono", "Cintura", "Altura", "BPM", "Energia", "Pressao_High", "Pressao_Low", "SpO2"])
             
     except Exception as e:
         return pd.DataFrame()
@@ -65,10 +72,9 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
         for col in cols:
             if col not in df.columns: df[col] = 0.0
         
-        # Converte para data pura para garantir consistência
+        # Garante que salva apenas a DATA (sem hora) para evitar o erro futuro
         df['Data'] = pd.to_datetime(df['Data']).dt.date
 
-        # Atualiza ou Cria
         vals = [peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia, p_high, p_low, spo2]
         cols_save = ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
         
@@ -100,7 +106,7 @@ defaults = {k: 0.0 for k in ['Peso', 'Altura', 'Cintura', 'Calorias', 'Proteina'
 defaults['Altura'] = 1.75
 defaults['Energia'] = 5
 
-# Edição (Carrega dados se existirem)
+# Edição
 dados_do_dia = df[df['Data'] == data_selecionada]
 if not dados_do_dia.empty:
     row = dados_do_dia.iloc[0]
@@ -138,14 +144,13 @@ if st.sidebar.button("💾 Salvar Dados"):
     time.sleep(1)
     st.rerun()
 
-# --- CÁLCULOS (Destravado para >2 dias) ---
+# --- CÁLCULOS ---
 tdee_real = 0
 status_ia = False
 imc_atual = 0
 ratio_proteina = 0
 
 if not df.empty:
-    # Garante numéricos
     cols_num = ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'SpO2']
     for c in cols_num: 
         if c in df.columns: df[c] = pd.to_numeric(df[c])
@@ -159,9 +164,11 @@ if not df.empty:
         delta_peso = recent.iloc[-1]['Peso'] - recent.iloc[0]['Peso']
         media_kcal = recent['Calorias'].mean()
         
-        superavit_diario = (delta_peso * 7700) / window_size
-        tdee_real = media_kcal - superavit_diario
-        status_ia = True
+        # Fórmula do TDEE (Evita divisão por zero se peso não mudou)
+        if window_size > 0:
+            superavit_diario = (delta_peso * 7700) / window_size
+            tdee_real = media_kcal - superavit_diario
+            status_ia = True
         
         peso_atual = recent.iloc[-1]['Peso']
         altura_atual = recent.iloc[-1]['Altura']
@@ -195,7 +202,7 @@ if not df.empty:
 
 st.markdown("---")
 
-# --- GRÁFICOS (Protegidos contra erro de coluna) ---
+# --- GRÁFICOS ---
 if not df.empty and 'Altura' in df.columns:
     altura_ref = df.iloc[-1]['Altura']
     df['Limite_Min'] = 18.5 * (altura_ref ** 2) if altura_ref > 0 else 0
@@ -210,6 +217,7 @@ if not df.empty and 'Altura' in df.columns:
     with tab2:
         st.caption("Pressão Arterial (Alta) e Oxigênio")
         if 'Pressao_High' in df.columns and 'SpO2' in df.columns:
+            # Filtra zeros para o gráfico não ficar poluido
             df_an = df[(df['Pressao_High'] > 0) | (df['SpO2'] > 0)]
             if not df_an.empty:
                 st.line_chart(df_an.set_index("Data")[['Pressao_High', 'SpO2']], color=["#FF0000", "#00FF00"])
