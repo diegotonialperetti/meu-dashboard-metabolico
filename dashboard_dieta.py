@@ -36,10 +36,9 @@ def load_data():
             for col in cols:
                 if col not in df.columns: df[col] = 0.0
             
-            # Limpeza e Faxina de Data
+            # Limpeza
             df['Data'] = pd.to_datetime(df['Data'], errors='coerce').dt.date
             df = df.dropna(subset=['Data']) 
-            
             df = df.sort_values(by="Data")
             df = df.drop_duplicates(subset=['Data'], keep='last')
             
@@ -50,8 +49,8 @@ def load_data():
     except Exception as e:
         return pd.DataFrame()
 
-# --- SALVAR DADOS ---
-def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia, p_high, p_low, spo2):
+# --- SALVAR DADOS (LINHA ÚNICA - BARRA LATERAL) ---
+def save_data_row(data_ref, peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia, p_high, p_low, spo2):
     repo = get_github_connection()
     if not repo: return
 
@@ -60,6 +59,7 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
         csv_string = contents.decoded_content.decode("utf-8")
         df = pd.read_csv(StringIO(csv_string))
         
+        # Garante estrutura antes de salvar
         cols = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
         for col in cols:
             if col not in df.columns: df[col] = 0.0
@@ -85,7 +85,32 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
         repo.update_file("dados_dieta.csv", msg_commit, output.getvalue(), contents.sha)
         
     except Exception as e:
-        st.error(f"Erro ao salvar: {e}")
+        st.error(f"Erro ao salvar linha: {e}")
+
+# --- SALVAR TABELA INTEIRA (MODO EXCEL) ---
+def save_full_dataframe(df_to_save):
+    repo = get_github_connection()
+    if not repo: return
+
+    try:
+        # 1. Limpeza de segurança antes de subir
+        df_to_save['Data'] = pd.to_datetime(df_to_save['Data'], errors='coerce').dt.date
+        df_to_save = df_to_save.dropna(subset=['Data'])
+        df_to_save = df_to_save.sort_values(by="Data")
+        df_to_save = df_to_save.drop_duplicates(subset=['Data'], keep='last')
+
+        # 2. Pega o SHA do arquivo atual para permitir a substituição
+        contents = repo.get_contents("dados_dieta.csv")
+        
+        # 3. Salva
+        output = StringIO()
+        df_to_save.to_csv(output, index=False)
+        repo.update_file("dados_dieta.csv", "Edição em Massa na Tabela", output.getvalue(), contents.sha)
+        
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar tabela: {e}")
+        return False
 
 # --- INICIALIZAÇÃO ---
 df = load_data()
@@ -98,7 +123,7 @@ defaults = {k: 0.0 for k in ['Peso', 'Altura', 'Cintura', 'Calorias', 'Proteina'
 defaults['Altura'] = 1.75
 defaults['Energia'] = 5
 
-# Edição
+# Edição Sidebar
 dados_do_dia = df[df['Data'] == data_selecionada]
 if not dados_do_dia.empty:
     row = dados_do_dia.iloc[0]
@@ -109,7 +134,7 @@ else:
     if not df.empty and 'Altura' in df.columns:
         if df.iloc[-1]['Altura'] > 0: defaults['Altura'] = float(df.iloc[-1]['Altura'])
 
-# --- FORMULÁRIO ---
+# --- FORMULÁRIO SIDEBAR ---
 with st.sidebar.expander("💍 Smart Ring / Cardio", expanded=True):
     bpm_inp = st.number_input("BPM Médio", value=int(defaults['BPM']), step=1)
     spo2_inp = st.number_input("Oxigênio (SpO2 %)", value=int(defaults['SpO2']), step=1, max_value=100)
@@ -128,9 +153,9 @@ sono_inp = st.sidebar.number_input("Sono (h)", value=defaults['Sono'], format="%
 energia_inp = st.sidebar.slider("Energia", 1, 10, value=int(defaults['Energia']))
 altura_inp = st.sidebar.hidden_input = defaults['Altura'] 
 
-if st.sidebar.button("💾 Salvar Dados"):
+if st.sidebar.button("💾 Salvar Dados (Sidebar)"):
     with st.spinner("Salvando..."):
-        save_data(data_selecionada, peso_inp, calorias_inp, passos_inp, proteina_inp, sono_inp, cintura_inp, altura_inp, bpm_inp, energia_inp, p_high_inp, p_low_inp, spo2_inp)
+        save_data_row(data_selecionada, peso_inp, calorias_inp, passos_inp, proteina_inp, sono_inp, cintura_inp, altura_inp, bpm_inp, energia_inp, p_high_inp, p_low_inp, spo2_inp)
     st.success("Dados Salvos!")
     import time
     time.sleep(1)
@@ -144,7 +169,6 @@ ratio_proteina = 0
 
 if not df.empty:
     cols_num = ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'SpO2']
-    # Força conversão para numérico aqui para evitar erros de texto
     for c in cols_num: 
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
@@ -172,7 +196,7 @@ if not df.empty:
     else:
         status_ia = False
 
-# --- LAYOUT ---
+# --- LAYOUT DASHBOARD ---
 st.subheader("📊 Painel Vital")
 k1, k2, k3, k4 = st.columns(4)
 
@@ -183,20 +207,12 @@ else:
     k1.metric("Status", f"{len(df)} registro(s)")
 
 if not df.empty:
-    # CÁLCULO DE SONO (CORRIGIDO E REFORÇADO)
-    # 1. Filtra > 0.1 para evitar erros de arredondamento
-    # 2. Pega os últimos 7 dias VÁLIDOS (não os últimos 7 dias corridos)
     df_sono = df[df['Sono'] > 0.1].tail(7)
     if not df_sono.empty:
         media_sono = df_sono['Sono'].mean()
-        dias_usados = len(df_sono)
-        val_sono = f"{media_sono:.1f} h"
-        help_text = f"Média calculada sobre {dias_usados} dias registrados."
+        k3.metric("💤 Sono Médio", f"{media_sono:.1f} h", help=f"Base: {len(df_sono)} dias")
     else:
-        val_sono = "--"
-        help_text = "Nenhum dia com sono > 0 registrado."
-    
-    k3.metric("💤 Sono Médio", val_sono, help=help_text)
+        k3.metric("💤 Sono Médio", "--")
     
     if 'SpO2' in df.columns:
         dias_spo2 = df[df['SpO2'] > 0].tail(7)
@@ -232,5 +248,27 @@ if not df.empty and 'Altura' in df.columns:
             if not df_en.empty:
                 st.bar_chart(df_en.set_index("Data")["Energia"])
 
-    with st.expander("Ver Tabela Completa"):
-        st.dataframe(df.sort_values(by="Data", ascending=False))
+    # --- TABELA EDITÁVEL (A MÁGICA ACONTECE AQUI) ---
+    with st.expander("📝 Ver Tabela Completa (Modo Edição)", expanded=False):
+        st.info("💡 Dica: Clique em qualquer célula para editar. Adicione novas linhas clicando no `+` lá embaixo. Quando terminar, clique no botão 'Salvar Tabela'.")
+        
+        # Configuração das colunas para ficar bonito
+        df_editado = st.data_editor(
+            df.sort_values(by="Data", ascending=False),
+            num_rows="dynamic", # Permite adicionar/remover linhas
+            use_container_width=True,
+            column_config={
+                "Peso": st.column_config.NumberColumn(format="%.2f kg"),
+                "Altura": st.column_config.NumberColumn(format="%.2f m"),
+                "Sono": st.column_config.NumberColumn(format="%.1f h"),
+                "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            }
+        )
+        
+        if st.button("💾 Salvar Alterações da Tabela"):
+            with st.spinner("Salvando tabela completa..."):
+                if save_full_dataframe(df_editado):
+                    st.success("Tabela atualizada com sucesso!")
+                    import time
+                    time.sleep(1)
+                    st.rerun()
