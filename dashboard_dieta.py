@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 from github import Github
 from io import StringIO
 from datetime import datetime, date
@@ -49,7 +50,7 @@ def load_data():
     except Exception as e:
         return pd.DataFrame()
 
-# --- SALVAR DADOS (LINHA ÚNICA - BARRA LATERAL) ---
+# --- SALVAR LINHA ---
 def save_data_row(data_ref, peso, calorias, passos, proteina, sono, cintura, altura, bpm, energia, p_high, p_low, spo2):
     repo = get_github_connection()
     if not repo: return
@@ -59,7 +60,6 @@ def save_data_row(data_ref, peso, calorias, passos, proteina, sono, cintura, alt
         csv_string = contents.decoded_content.decode("utf-8")
         df = pd.read_csv(StringIO(csv_string))
         
-        # Garante estrutura antes de salvar
         cols = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
         for col in cols:
             if col not in df.columns: df[col] = 0.0
@@ -87,30 +87,42 @@ def save_data_row(data_ref, peso, calorias, passos, proteina, sono, cintura, alt
     except Exception as e:
         st.error(f"Erro ao salvar linha: {e}")
 
-# --- SALVAR TABELA INTEIRA (MODO EXCEL) ---
+# --- SALVAR TABELA COMPLETA ---
 def save_full_dataframe(df_to_save):
     repo = get_github_connection()
     if not repo: return
 
     try:
-        # 1. Limpeza de segurança antes de subir
         df_to_save['Data'] = pd.to_datetime(df_to_save['Data'], errors='coerce').dt.date
         df_to_save = df_to_save.dropna(subset=['Data'])
         df_to_save = df_to_save.sort_values(by="Data")
         df_to_save = df_to_save.drop_duplicates(subset=['Data'], keep='last')
 
-        # 2. Pega o SHA do arquivo atual para permitir a substituição
         contents = repo.get_contents("dados_dieta.csv")
-        
-        # 3. Salva
         output = StringIO()
         df_to_save.to_csv(output, index=False)
-        repo.update_file("dados_dieta.csv", "Edição em Massa na Tabela", output.getvalue(), contents.sha)
-        
+        repo.update_file("dados_dieta.csv", "Edição em Massa", output.getvalue(), contents.sha)
         return True
     except Exception as e:
         st.error(f"Erro ao salvar tabela: {e}")
         return False
+
+# --- FUNÇÃO DE GRÁFICO TRAVADO (ALTAIR) ---
+def plotar_travado(df, cols_y, cores, titulo_y="Valor"):
+    # Prepara dados para o formato do Altair (Long Format)
+    source = df[['Data'] + cols_y].melt('Data', var_name='Indicador', value_name='Valor')
+    
+    # Cria o gráfico base
+    chart = alt.Chart(source).mark_line(point=True).encode(
+        x=alt.X('Data:T', axis=alt.Axis(format="%d/%m", title="Data")), # T = Tempo
+        y=alt.Y('Valor:Q', scale=alt.Scale(zero=False), title=titulo_y), # Q = Quantidade, zero=False para dar zoom automático na escala
+        color=alt.Color('Indicador:N', scale=alt.Scale(domain=cols_y, range=cores), legend=alt.Legend(title="Legenda")),
+        tooltip=['Data', 'Indicador', 'Valor']
+    ).properties(
+        height=350
+    ).interactive(bind_y=False) # <--- AQUI ESTÁ A MÁGICA: bind_y=False trava o eixo vertical
+
+    st.altair_chart(chart, use_container_width=True)
 
 # --- INICIALIZAÇÃO ---
 df = load_data()
@@ -221,7 +233,7 @@ if not df.empty:
 
 st.markdown("---")
 
-# --- GRÁFICOS ---
+# --- GRÁFICOS INTERATIVOS TRAVADOS ---
 if not df.empty and 'Altura' in df.columns:
     altura_ref = df.iloc[-1]['Altura']
     df['Limite_Min'] = 18.5 * (altura_ref ** 2) if altura_ref > 0 else 0
@@ -230,15 +242,14 @@ if not df.empty and 'Altura' in df.columns:
     tab1, tab2, tab3 = st.tabs(["🎯 Peso & IMC", "💍 Smart Ring & Cardio", "⚡ Energia & Sono"])
     
     with tab1:
-        st.line_chart(df.set_index("Data")[['Peso', 'Limite_Min', 'Limite_Max']], 
-                      color=["#0000FF", "#00FF00", "#FF0000"]) 
+        plotar_travado(df, ['Peso', 'Limite_Min', 'Limite_Max'], ["#0000FF", "#00FF00", "#FF0000"], "Peso (kg)")
     
     with tab2:
         st.caption("Pressão Arterial (Alta) e Oxigênio")
         if 'Pressao_High' in df.columns and 'SpO2' in df.columns:
             df_an = df[(df['Pressao_High'] > 0) | (df['SpO2'] > 0)]
             if not df_an.empty:
-                st.line_chart(df_an.set_index("Data")[['Pressao_High', 'SpO2']], color=["#FF0000", "#00FF00"])
+                plotar_travado(df_an, ['Pressao_High', 'SpO2'], ["#FF0000", "#00FF00"], "Valor")
             else:
                 st.info("Registre dados do anel para ver o gráfico.")
 
@@ -246,16 +257,16 @@ if not df.empty and 'Altura' in df.columns:
         if 'Energia' in df.columns:
             df_en = df[df['Energia'] > 0]
             if not df_en.empty:
-                st.bar_chart(df_en.set_index("Data")["Energia"])
+                # Energia fica melhor como barra mesmo
+                st.bar_chart(df_en.set_index("Data")["Energia"], color="#FFA500")
 
-    # --- TABELA EDITÁVEL (A MÁGICA ACONTECE AQUI) ---
+    # --- TABELA EDITÁVEL ---
     with st.expander("📝 Ver Tabela Completa (Modo Edição)", expanded=False):
-        st.info("💡 Dica: Clique em qualquer célula para editar. Adicione novas linhas clicando no `+` lá embaixo. Quando terminar, clique no botão 'Salvar Tabela'.")
+        st.info("💡 Clique nas células para editar.")
         
-        # Configuração das colunas para ficar bonito
         df_editado = st.data_editor(
             df.sort_values(by="Data", ascending=False),
-            num_rows="dynamic", # Permite adicionar/remover linhas
+            num_rows="dynamic",
             use_container_width=True,
             column_config={
                 "Peso": st.column_config.NumberColumn(format="%.2f kg"),
