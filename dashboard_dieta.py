@@ -36,7 +36,7 @@ def load_data():
             for col in cols:
                 if col not in df.columns: df[col] = 0.0
             
-            # LIMPEZA PESADA (Mantida da versão anterior)
+            # Limpeza e Faxina de Data
             df['Data'] = pd.to_datetime(df['Data'], errors='coerce').dt.date
             df = df.dropna(subset=['Data']) 
             
@@ -64,7 +64,6 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
         for col in cols:
             if col not in df.columns: df[col] = 0.0
         
-        # Limpeza antes de salvar
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce').dt.date
         df = df.dropna(subset=['Data'])
 
@@ -91,7 +90,7 @@ def save_data(data_ref, peso, calorias, passos, proteina, sono, cintura, altura,
 # --- INICIALIZAÇÃO ---
 df = load_data()
 
-st.sidebar.header("📝 Diário & Smart Ring") # MUDADO AQUI
+st.sidebar.header("📝 Diário & Smart Ring")
 data_selecionada = st.sidebar.date_input("Data", datetime.now())
 
 # Defaults
@@ -111,7 +110,6 @@ else:
         if df.iloc[-1]['Altura'] > 0: defaults['Altura'] = float(df.iloc[-1]['Altura'])
 
 # --- FORMULÁRIO ---
-# MUDADO AQUI O NOME DO EXPANDER
 with st.sidebar.expander("💍 Smart Ring / Cardio", expanded=True):
     bpm_inp = st.number_input("BPM Médio", value=int(defaults['BPM']), step=1)
     spo2_inp = st.number_input("Oxigênio (SpO2 %)", value=int(defaults['SpO2']), step=1, max_value=100)
@@ -146,8 +144,9 @@ ratio_proteina = 0
 
 if not df.empty:
     cols_num = ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'SpO2']
+    # Força conversão para numérico aqui para evitar erros de texto
     for c in cols_num: 
-        if c in df.columns: df[c] = pd.to_numeric(df[c])
+        if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
     dias_registrados = len(df)
     
@@ -184,9 +183,20 @@ else:
     k1.metric("Status", f"{len(df)} registro(s)")
 
 if not df.empty:
-    dias_sono = df[df['Sono'] > 0].tail(7)
-    val_sono = f"{dias_sono['Sono'].mean():.1f} h" if not dias_sono.empty else "--"
-    k3.metric("💤 Sono Médio", val_sono)
+    # CÁLCULO DE SONO (CORRIGIDO E REFORÇADO)
+    # 1. Filtra > 0.1 para evitar erros de arredondamento
+    # 2. Pega os últimos 7 dias VÁLIDOS (não os últimos 7 dias corridos)
+    df_sono = df[df['Sono'] > 0.1].tail(7)
+    if not df_sono.empty:
+        media_sono = df_sono['Sono'].mean()
+        dias_usados = len(df_sono)
+        val_sono = f"{media_sono:.1f} h"
+        help_text = f"Média calculada sobre {dias_usados} dias registrados."
+    else:
+        val_sono = "--"
+        help_text = "Nenhum dia com sono > 0 registrado."
+    
+    k3.metric("💤 Sono Médio", val_sono, help=help_text)
     
     if 'SpO2' in df.columns:
         dias_spo2 = df[df['SpO2'] > 0].tail(7)
@@ -201,7 +211,6 @@ if not df.empty and 'Altura' in df.columns:
     df['Limite_Min'] = 18.5 * (altura_ref ** 2) if altura_ref > 0 else 0
     df['Limite_Max'] = 24.9 * (altura_ref ** 2) if altura_ref > 0 else 0
     
-    # MUDADO AQUI O NOME DA ABA
     tab1, tab2, tab3 = st.tabs(["🎯 Peso & IMC", "💍 Smart Ring & Cardio", "⚡ Energia & Sono"])
     
     with tab1:
