@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+import zipfile
 from github import Github
-from io import StringIO
+from io import StringIO, BytesIO
 from datetime import datetime, date
 
 # --- CONFIGURAÇÃO ---
@@ -33,10 +34,12 @@ def load_data():
             csv_string = contents.decoded_content.decode("utf-8")
             df = pd.read_csv(StringIO(csv_string))
             
+            # Colunas
             cols = ['Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']
             for col in cols:
                 if col not in df.columns: df[col] = 0.0
             
+            # Limpeza
             df['Data'] = pd.to_datetime(df['Data'], errors='coerce').dt.date
             df = df.dropna(subset=['Data']) 
             df = df.sort_values(by="Data")
@@ -86,10 +89,103 @@ def save_data_row(data_ref, peso, calorias, passos, proteina, sono, cintura, alt
     except Exception as e:
         st.error(f"Erro ao salvar linha: {e}")
 
+# --- PROCESSAR ZIP DA PULSEIRA (O MÁGICO) ---
+def processar_zip_pulseira(zip_file, df_atual):
+    try:
+        novos_dados = []
+        
+        with zipfile.ZipFile(zip_file) as z:
+            file_names = z.namelist()
+            
+            # 1. Processa Passos (user_step.csv)
+            # Estrutura esperada: date, step, calory
+            df_step = pd.DataFrame()
+            if "user_step.csv" in file_names:
+                with z.open("user_step.csv") as f:
+                    df_step = pd.read_csv(f)
+                    df_step['Data'] = pd.to_datetime(df_step['date']).dt.date
+                    # Agrupa por dia (soma passos)
+                    df_step = df_step.groupby('Data').agg({'step': 'sum', 'calory': 'sum'}).reset_index()
+
+            # 2. Processa Cardio (user_hb.csv)
+            # Estrutura esperada: date, heart, lblood, hblood, spo
+            df_hb = pd.DataFrame()
+            if "user_hb.csv" in file_names:
+                with z.open("user_hb.csv") as f:
+                    df_hb = pd.read_csv(f)
+                    df_hb['Data'] = pd.to_datetime(df_hb['date']).dt.date
+                    # Agrupa por dia (média)
+                    df_hb = df_hb.groupby('Data').mean(numeric_only=True).reset_index()
+
+            # 3. Processa Sono (user_sleep.csv)
+            # Estrutura esperada: date, minutes
+            df_sleep = pd.DataFrame()
+            if "user_sleep.csv" in file_names:
+                with z.open("user_sleep.csv") as f:
+                    df_sleep = pd.read_csv(f)
+                    df_sleep['Data'] = pd.to_datetime(df_sleep['date']).dt.date
+                    # Soma minutos de sono do dia e converte para horas
+                    df_sleep = df_sleep.groupby('Data')['minutes'].sum().reset_index()
+                    df_sleep['Sono_Horas'] = df_sleep['minutes'] / 60
+
+        # --- MERGE DOS DADOS DA PULSEIRA ---
+        # Começa com os passos como base, ou cria base vazia
+        if not df_step.empty:
+            df_final = df_step.copy()
+        else:
+            df_final = pd.DataFrame(columns=['Data'])
+
+        # Junta Cardio
+        if not df_hb.empty:
+            df_final = pd.merge(df_final, df_hb, on='Data', how='outer')
+        
+        # Junta Sono
+        if not df_sleep.empty:
+            df_final = pd.merge(df_final, df_sleep, on='Data', how='outer')
+            
+        # Limpa NaN
+        df_final = df_final.fillna(0)
+        
+        # --- ATUALIZAÇÃO DO DATAFRAME PRINCIPAL ---
+        # Transforma o DF principal em Dict para busca rápida
+        df_atual = df_atual.set_index('Data')
+        df_final = df_final.set_index('Data')
+        
+        contador = 0
+        
+        for data, row in df_final.iterrows():
+            if data in df_atual.index:
+                # Atualiza existente se o valor for maior (para não sobrescrever com zero)
+                if 'step' in row and row['step'] > 0: df_atual.at[data, 'Passos'] = row['step']
+                if 'Sono_Horas' in row and row['Sono_Horas'] > 0: df_atual.at[data, 'Sono'] = row['Sono_Horas']
+                if 'heart' in row and row['heart'] > 0: df_atual.at[data, 'BPM'] = row['heart']
+                if 'spo' in row and row['spo'] > 0: df_atual.at[data, 'SpO2'] = row['spo']
+                if 'hblood' in row and row['hblood'] > 0: df_atual.at[data, 'Pressao_High'] = row['hblood']
+                if 'lblood' in row and row['lblood'] > 0: df_atual.at[data, 'Pressao_Low'] = row['lblood']
+            else:
+                # Cria nova linha se não existir (Cuidado com colunas faltantes)
+                nova_linha = pd.Series(0, index=df_atual.columns)
+                if 'step' in row: nova_linha['Passos'] = row['step']
+                if 'Sono_Horas' in row: nova_linha['Sono'] = row['Sono_Horas']
+                if 'heart' in row: nova_linha['BPM'] = row['heart']
+                if 'spo' in row: nova_linha['SpO2'] = row['spo']
+                if 'hblood' in row: nova_linha['Pressao_High'] = row['hblood']
+                if 'lblood' in row: nova_linha['Pressao_Low'] = row['lblood']
+                
+                df_atual.loc[data] = nova_linha
+                
+            contador += 1
+            
+        return df_atual.reset_index(), contador
+
+    except Exception as e:
+        st.error(f"Erro ao processar ZIP: {e}")
+        return df_atual, 0
+
 # --- SALVAR TABELA COMPLETA ---
 def save_full_dataframe(df_to_save):
     repo = get_github_connection()
-    if not repo: return
+    if not repo: return False
 
     try:
         df_to_save['Data'] = pd.to_datetime(df_to_save['Data'], errors='coerce').dt.date
@@ -100,57 +196,11 @@ def save_full_dataframe(df_to_save):
         contents = repo.get_contents("dados_dieta.csv")
         output = StringIO()
         df_to_save.to_csv(output, index=False)
-        repo.update_file("dados_dieta.csv", "Edição em Massa", output.getvalue(), contents.sha)
+        repo.update_file("dados_dieta.csv", "Importação ZIP / Edição Massa", output.getvalue(), contents.sha)
         return True
     except Exception as e:
         st.error(f"Erro ao salvar tabela: {e}")
         return False
-
-# --- CÉREBRO: REGRESSÃO LINEAR PARA TDEE ---
-def calcular_tdee_inteligente(df):
-    # Precisa de pelo menos 3 pontos para uma tendência minimamente confiável
-    if len(df) < 3:
-        return 0, False, "Coletando dados..."
-
-    # Pega os últimos 14 dias para ter contexto, mas dá mais peso para o recente
-    recent = df.tail(14).copy()
-    
-    # Prepara dados para Regressão Linear (Converte data para número)
-    recent['Dia_Num'] = (pd.to_datetime(recent['Data']) - pd.to_datetime(recent['Data'].min())).dt.days
-    
-    # 1. Calcula a TENDÊNCIA do Peso (Slope) usando numpy polyfit
-    # Isso ignora picos repentinos (água) e vê a direção real da curva
-    coef = np.polyfit(recent['Dia_Num'], recent['Peso'], 1)
-    perda_diaria_kg_tendencia = coef[0] # Slope da reta (kg por dia)
-    
-    # 2. Média de Calorias Ingeridas
-    media_kcal = recent['Calorias'].mean()
-    
-    # 3. Cálculo do TDEE suavizado
-    # Se perda_diaria for negativa (emagreceu), TDEE é maior que ingestão
-    # Se perda_diaria for positiva (engordou), TDEE é menor que ingestão
-    # Mas usamos a TENDÊNCIA, não o peso de hoje
-    
-    deficit_real = perda_diaria_kg_tendencia * 7700
-    tdee_calculado = media_kcal - deficit_real
-    
-    # 4. Trava de Segurança (Biohacking)
-    # Impede valores absurdos causados por erros extremos
-    if tdee_calculado < 1200: tdee_calculado = 1200 # Mínimo biológico
-    if tdee_calculado > 4000: tdee_calculado = 4000 # Máximo provável
-    
-    # Detecção de Retenção Hídrica
-    # Compara o peso real de hoje com o peso "Esperado" pela tendência
-    peso_hoje = recent.iloc[-1]['Peso']
-    peso_esperado = (recent.iloc[-1]['Dia_Num'] * coef[0]) + coef[1]
-    
-    msg = "Tendência Estável"
-    if peso_hoje > (peso_esperado + 0.5):
-        msg = "💧 Retenção Detectada (Ignorando pico)"
-    elif peso_hoje < (peso_esperado - 0.5):
-        msg = "🔥 Desidratação/Queima Rápida"
-        
-    return tdee_calculado, True, msg
 
 # --- GRÁFICOS TRAVADOS (ALTAIR) ---
 def plotar_travado(df, cols_y, cores, titulo_y="Valor"):
@@ -163,10 +213,49 @@ def plotar_travado(df, cols_y, cores, titulo_y="Valor"):
     ).properties(height=350).interactive(bind_y=False)
     st.altair_chart(chart, use_container_width=True)
 
+# --- CÁLCULO TDEE ---
+def calcular_tdee_inteligente(df):
+    if len(df) < 3: return 0, False, "Coletando dados..."
+    recent = df.tail(14).copy()
+    recent['Dia_Num'] = (pd.to_datetime(recent['Data']) - pd.to_datetime(recent['Data'].min())).dt.days
+    coef = np.polyfit(recent['Dia_Num'], recent['Peso'], 1)
+    perda_diaria_kg_tendencia = coef[0]
+    media_kcal = recent['Calorias'].mean()
+    deficit_real = perda_diaria_kg_tendencia * 7700
+    tdee_calculado = media_kcal - deficit_real
+    if tdee_calculado < 1200: tdee_calculado = 1200 
+    if tdee_calculado > 4000: tdee_calculado = 4000
+    
+    peso_hoje = recent.iloc[-1]['Peso']
+    peso_esperado = (recent.iloc[-1]['Dia_Num'] * coef[0]) + coef[1]
+    msg = "Tendência Estável"
+    if peso_hoje > (peso_esperado + 0.5): msg = "💧 Retenção Detectada"
+    elif peso_hoje < (peso_esperado - 0.5): msg = "🔥 Queima Rápida"
+        
+    return tdee_calculado, True, msg
+
 # --- INICIALIZAÇÃO ---
 df = load_data()
 
 st.sidebar.header("📝 Diário & Smart Ring")
+
+# --- NOVO: IMPORTADOR DE ZIP ---
+uploaded_zip = st.sidebar.file_uploader("📂 Importar ZIP da Pulseira", type="zip")
+if uploaded_zip is not None:
+    if st.sidebar.button("Processar ZIP"):
+        with st.spinner("Lendo arquivos da pulseira..."):
+            df_atualizado, qtd = processar_zip_pulseira(uploaded_zip, df.copy())
+            if qtd > 0:
+                sucesso = save_full_dataframe(df_atualizado)
+                if sucesso:
+                    st.success(f"{qtd} dias importados com sucesso!")
+                    import time
+                    time.sleep(2)
+                    st.rerun()
+            else:
+                st.warning("Não encontrei dados novos no ZIP.")
+
+# --- FORMULÁRIO PADRÃO ---
 data_selecionada = st.sidebar.date_input("Data", datetime.now())
 
 defaults = {k: 0.0 for k in ['Peso', 'Altura', 'Cintura', 'Calorias', 'Proteina', 'Passos', 'Sono', 'BPM', 'Energia', 'Pressao_High', 'Pressao_Low', 'SpO2']}
@@ -209,20 +298,17 @@ if st.sidebar.button("💾 Salvar Dados (Sidebar)"):
     time.sleep(1)
     st.rerun()
 
-# --- CÁLCULOS INTELIGENTES (TDEE SMOOTH) ---
+# --- DASHBOARD ---
 tdee_real, status_tdee, msg_tdee = 0, False, ""
-imc_atual = 0
-ratio_proteina = 0
+imc_atual, ratio_proteina = 0, 0
 
 if not df.empty:
     cols_num = ['Peso', 'Calorias', 'Passos', 'Proteina', 'Sono', 'Cintura', 'Altura', 'BPM', 'Energia', 'Pressao_High', 'SpO2']
     for c in cols_num: 
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
-    # 1. Chama o Cérebro Estatístico
     tdee_real, status_tdee, msg_tdee = calcular_tdee_inteligente(df)
     
-    # 2. Outros cálculos simples
     recent = df.tail(7)
     peso_atual = recent.iloc[-1]['Peso']
     altura_atual = recent.iloc[-1]['Altura']
@@ -232,12 +318,11 @@ if not df.empty:
     media_prot = dias_com_prot['Proteina'].mean() if not dias_com_prot.empty else 0
     if peso_atual > 0: ratio_proteina = media_prot / peso_atual
 
-# --- LAYOUT DASHBOARD ---
+# --- LAYOUT ---
 st.subheader("📊 Painel Vital (IA Estatística)")
 k1, k2, k3, k4 = st.columns(4)
 
 if status_tdee:
-    # Mostra o TDEE e a mensagem da IA (ex: Retenção Detectada)
     k1.metric("🔥 TDEE Inteligente", f"{int(tdee_real)} kcal", msg_tdee)
     k2.metric("🍖 Proteína", f"{ratio_proteina:.1f} g/kg")
 else:
@@ -267,7 +352,6 @@ if not df.empty and 'Altura' in df.columns:
     tab1, tab2, tab3 = st.tabs(["🎯 Peso & IMC", "💍 Smart Ring & Cardio", "⚡ Energia & Sono"])
     
     with tab1:
-        # Peso com Linhas de Tendência seria legal no futuro
         plotar_travado(df, ['Peso', 'Limite_Min', 'Limite_Max'], ["#0000FF", "#00FF00", "#FF0000"], "Peso (kg)")
     
     with tab2:
@@ -285,9 +369,9 @@ if not df.empty and 'Altura' in df.columns:
             if not df_en.empty:
                 st.bar_chart(df_en.set_index("Data")["Energia"])
 
+    # --- TABELA EDITÁVEL ---
     with st.expander("📝 Ver Tabela Completa (Modo Edição)", expanded=False):
         st.info("💡 Clique nas células para editar.")
-        
         df_editado = st.data_editor(
             df.sort_values(by="Data", ascending=False),
             num_rows="dynamic",
@@ -299,7 +383,6 @@ if not df.empty and 'Altura' in df.columns:
                 "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
             }
         )
-        
         if st.button("💾 Salvar Alterações da Tabela"):
             with st.spinner("Salvando tabela completa..."):
                 if save_full_dataframe(df_editado):
